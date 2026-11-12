@@ -45,6 +45,35 @@ Parameters:
     NoEcho: true
     Description: 'Data.gov.in API Key'
 
+  GeminiAPIKey:
+    Type: String
+    NoEcho: true
+    Default: ''
+    Description: 'Google Gemini API key for the AI assistant, RAG and translation (aistudio.google.com/apikey)'
+
+  NewsDataAPIKey:
+    Type: String
+    NoEcho: true
+    Default: ''
+    Description: 'NewsData.io API key for agriculture news (server-side only)'
+
+  RazorpayKeyId:
+    Type: String
+    Default: ''
+    Description: 'Razorpay key id (public, returned to Checkout by the backend)'
+
+  RazorpayKeySecret:
+    Type: String
+    NoEcho: true
+    Default: ''
+    Description: 'Razorpay key secret (server only)'
+
+  RazorpayWebhookSecret:
+    Type: String
+    NoEcho: true
+    Default: ''
+    Description: 'Razorpay webhook secret for /api/payments/webhook'
+
   SchemesSheetURL:
     Type: String
     Description: 'Google Sheets CSV URL for schemes'
@@ -191,11 +220,20 @@ Resources:
           DATA_GOV_API_KEY=${DataGovAPIKey}
           SCHEMES_SHEET_URL=${SchemesSheetURL}
           FRONTEND_URL=*
+          GEMINI_API_KEY=${GeminiAPIKey}
+          JOB_SCHEDULER=bullmq
+          VECTOR_SEARCH_MODE=local
+          NEWSDATA_API_KEY=${NewsDataAPIKey}
+          RAZORPAY_KEY_ID=${RazorpayKeyId}
+          RAZORPAY_KEY_SECRET=${RazorpayKeySecret}
+          RAZORPAY_WEBHOOK_SECRET=${RazorpayWebhookSecret}
           ENVEOF
 
           sudo -u ubuntu npm install
           sudo -u ubuntu pm2 start index.js --name "krishak-backend"
           sudo -u ubuntu pm2 save
+          # Build the RAG knowledge base (needs GEMINI_API_KEY; safe to fail)
+          sudo -u ubuntu npm run rag:ingest || echo "rag:ingest skipped"
 
           # Configure PM2 startup on system boot
           env PATH=$PATH:/usr/bin pm2 startup systemd -u ubuntu --hp /home/ubuntu
@@ -212,10 +250,6 @@ Resources:
 
           sudo -u ubuntu cat > .env << FENVEOF
           VITE_API_URL=/api
-          VITE_RAZORPAY_KEY_ID=rzp_test_placeholder
-          VITE_WEATHER_API_KEY=${OpenWeatherAPIKey}
-          VITE_WEATHER_BASE_URL=https://api.openweathermap.org
-          VITE_NEWSDATA_API_KEY=pub_2f4c600e7310491fb5df044fc12ba621
           FENVEOF
 
           sudo -u ubuntu npm install
