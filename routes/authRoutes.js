@@ -4,8 +4,6 @@ const {
   login,
   googleAuth,
   googleCallback,
-  verifyTwoFactor,
-  resendOtp,
   forgotPassword,
   resetPassword,
   getUserProfile,
@@ -18,30 +16,6 @@ const {
 } = require("../middleware/rateLimiter");
 
 const router = express.Router();
-
-// Rate limiter for 2FA verification attempts
-const otpVerifyLimiter = createRateLimiter({
-  keyPrefix: "rl:2fa:verify",
-  limits: [
-    { type: "ip", capacity: 15, refillRate: 0.25 }, // 15 burst, 1 every 4s
-  ],
-  identifierExtractor: (req) => ({
-    ip: req.ip,
-    identifier: req.body?.sessionId,
-  }),
-});
-
-// Rate limiter for 2FA resend requests
-const otpResendLimiter = createRateLimiter({
-  keyPrefix: "rl:2fa:resend",
-  limits: [
-    { type: "ip", capacity: 4, refillRate: 0.033 }, // 4 burst, 1 every 30s
-  ],
-  identifierExtractor: (req) => ({
-    ip: req.ip,
-    identifier: req.body?.sessionId,
-  }),
-});
 
 // Rate limiter for forgot-password requests (prevent email spam)
 const forgotPasswordLimiter = createRateLimiter({
@@ -62,10 +36,6 @@ router.post("/login", loginRateLimiter, login);
 // Google OAuth 2.0 endpoints
 router.get("/google", googleAuth);
 router.get("/google/callback", googleCallback);
-
-// Two-Factor Authentication endpoints
-router.post("/2fa/verify", otpVerifyLimiter, verifyTwoFactor);
-router.post("/2fa/resend", otpResendLimiter, resendOtp);
 
 // Password Reset endpoints
 router.post("/forgot-password", forgotPasswordLimiter, forgotPassword);

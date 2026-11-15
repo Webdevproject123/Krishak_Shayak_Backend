@@ -7,19 +7,10 @@ const {
   clearFailedLogins,
 } = require("../middleware/rateLimiter");
 const {
-  sendOtpEmail,
   sendLoginNotification,
   sendSecurityAlert,
   sendPasswordResetEmail,
 } = require("../services/emailService");
-const {
-  generateOtp,
-  verifyOtp,
-  canResendOtp,
-  createPendingSession,
-  getPendingSession,
-  deletePendingSession,
-} = require("../services/otpService");
 const {
   getGoogleAuthUrl,
   validateState,
@@ -128,7 +119,6 @@ exports.register = async (req, res) => {
       userType,
       address,
       authProvider: "local",
-      twoFactorEnabled: process.env.TWO_FACTOR_ENABLED !== "false",
     };
 
     // Add seller-specific fields if userType is seller
@@ -162,7 +152,7 @@ exports.register = async (req, res) => {
   }
 };
 
-// @desc    Login user (with 2FA trigger if enabled)
+// @desc    Login user
 // @route   POST /api/auth/login
 // @access  Public
 exports.login = async (req, res) => {
@@ -188,50 +178,7 @@ exports.login = async (req, res) => {
       // Clear failed login counter on success
       clearFailedLogins(clientIp, normalizedEmail);
 
-      // Check if 2FA is required
-      const is2faActive =
-        process.env.TWO_FACTOR_ENABLED !== "false" &&
-        user.twoFactorEnabled !== false;
-
-      if (is2faActive) {
-        // Create pending 2FA session in Redis (storing rememberMe state)
-        const sessionId = await createPendingSession(
-          user._id.toString(),
-          clientIp,
-          req.headers["user-agent"],
-          rememberMe
-        );
-
-        if (!sessionId) {
-          // If Redis session creation failed, fall back to direct login
-          console.warn("[AUTH] Failed to create 2FA session, falling back to direct login");
-        } else {
-          // Generate and email OTP
-          const otpData = await generateOtp(user._id.toString());
-          if (otpData) {
-            // Asynchronously dispatch email
-            sendOtpEmail(user.email, otpData.otp, user.name).catch((err) =>
-              console.error("[AUTH] Error sending OTP email:", err.message)
-            );
-          }
-
-          // Return pending session to frontend (no JWT issued yet)
-          const maskedEmail = user.email.replace(
-            /(.{2})(.*)(?=@)/,
-            (_, a, b) => a + "*".repeat(b.length)
-          );
-
-          return res.json({
-            success: true,
-            requiresTwoFactor: true,
-            sessionId,
-            emailPreview: maskedEmail,
-            message: "OTP has been sent to your registered email",
-          });
-        }
-      }
-
-      // If 2FA is not enabled or failed over: Issue JWT directly
+      // Issue JWT
       user.lastLoginAt = new Date();
       user.lastLoginIp = clientIp;
       await user.save();
@@ -266,176 +213,6 @@ exports.login = async (req, res) => {
       success: false,
       message: "Server error during login",
       error: process.env.NODE_ENV === "development" ? error.message : undefined,
-    });
-  }
-};
-
-// ---------------------------------------------------------------------------
-// Two-Factor Authentication (OTP)
-// ---------------------------------------------------------------------------
-
-// @desc    Verify 2FA OTP and issue JWT
-// @route   POST /api/auth/2fa/verify
-// @access  Public
-exports.verifyTwoFactor = async (req, res) => {
-  try {
-    const { sessionId, otp } = req.body;
-
-    if (!sessionId || !otp) {
-      return res.status(400).json({
-        success: false,
-        message: "Session ID and OTP are required",
-      });
-    }
-
-    // Retrieve pending session
-    const session = await getPendingSession(sessionId);
-    if (!session) {
-      return res.status(400).json({
-        success: false,
-        errorType: "SESSION_EXPIRED",
-        message: "Your login session has expired. Please log in again.",
-      });
-    }
-
-    // Verify OTP against stored hash
-    const result = await verifyOtp(session.userId, otp.toString().trim());
-
-    if (!result.success) {
-      if (result.error === "expired") {
-        return res.status(400).json({
-          success: false,
-          errorType: "OTP_EXPIRED",
-          message: "The OTP has expired. Please request a new one.",
-        });
-      }
-
-      if (result.error === "too_many_attempts") {
-        await deletePendingSession(sessionId);
-        return res.status(400).json({
-          success: false,
-          errorType: "TOO_MANY_ATTEMPTS",
-          message: "Too many incorrect attempts. Please log in again to generate a new OTP.",
-        });
-      }
-
-      return res.status(400).json({
-        success: false,
-        errorType: "INVALID_OTP",
-        message: "Invalid verification code. Please check and try again.",
-        attemptsRemaining: result.attemptsRemaining,
-      });
-    }
-
-    // OTP verified: Clean up session
-    await deletePendingSession(sessionId);
-
-    // Retrieve user and generate token
-    const user = await User.findById(session.userId);
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: "User account not found",
-      });
-    }
-
-    user.lastLoginAt = new Date();
-    user.lastLoginIp = req.ip;
-    await user.save();
-
-    // Dispatch login notification email
-    const clientInfo = getClientInfo(req);
-    sendLoginNotification(user.email, user.name, clientInfo).catch((err) =>
-      console.error("[AUTH] Error sending login notification:", err.message)
-    );
-
-    // Check rememberMe preference (from request body or pending session)
-    const isRemembered =
-      req.body.rememberMe !== undefined
-        ? req.body.rememberMe !== false
-        : session.rememberMe !== false;
-
-    return res.json({
-      success: true,
-      message: "Two-factor verification successful",
-      token: generateToken(user._id, isRemembered),
-      user: formatUserResponse(user),
-    });
-  } catch (error) {
-    console.error("2FA Verify Error:", error);
-    res.status(500).json({
-      success: false,
-      message: "Server error during 2FA verification",
-    });
-  }
-};
-
-// @desc    Resend 2FA OTP
-// @route   POST /api/auth/2fa/resend
-// @access  Public
-exports.resendOtp = async (req, res) => {
-  try {
-    const { sessionId } = req.body;
-
-    if (!sessionId) {
-      return res.status(400).json({
-        success: false,
-        message: "Session ID is required",
-      });
-    }
-
-    // Retrieve pending session
-    const session = await getPendingSession(sessionId);
-    if (!session) {
-      return res.status(400).json({
-        success: false,
-        errorType: "SESSION_EXPIRED",
-        message: "Your login session has expired. Please log in again.",
-      });
-    }
-
-    // Check resend cooldown
-    const cooldown = await canResendOtp(session.userId);
-    if (!cooldown.canResend) {
-      return res.status(429).json({
-        success: false,
-        errorType: "COOLDOWN_ACTIVE",
-        message: `Please wait ${cooldown.waitSeconds} seconds before requesting a new OTP.`,
-        waitSeconds: cooldown.waitSeconds,
-      });
-    }
-
-    // Find user
-    const user = await User.findById(session.userId);
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: "User account not found",
-      });
-    }
-
-    // Generate new OTP (invalidates old one)
-    const otpData = await generateOtp(session.userId);
-    if (!otpData) {
-      return res.status(500).json({
-        success: false,
-        message: "Failed to generate OTP. Please try again.",
-      });
-    }
-
-    // Send new OTP email
-    await sendOtpEmail(user.email, otpData.otp, user.name);
-
-    return res.json({
-      success: true,
-      message: "A new verification code has been sent to your email.",
-      expiresIn: otpData.expiresIn,
-    });
-  } catch (error) {
-    console.error("Resend OTP Error:", error);
-    res.status(500).json({
-      success: false,
-      message: "Server error while resending OTP",
     });
   }
 };
@@ -528,30 +305,6 @@ exports.googleCallback = async (req, res) => {
       ).catch((err) =>
         console.error("[AUTH] Security alert send error:", err.message)
       );
-    }
-
-    // Check if 2FA is explicitly enabled for Google sign-in
-    const requireGoogle2fa = process.env.TWO_FACTOR_GOOGLE === "true";
-
-    if (requireGoogle2fa && user.twoFactorEnabled !== false) {
-      const sessionId = await createPendingSession(
-        user._id.toString(),
-        req.ip,
-        req.headers["user-agent"]
-      );
-
-      if (sessionId) {
-        const otpData = await generateOtp(user._id.toString());
-        if (otpData) {
-          sendOtpEmail(user.email, otpData.otp, user.name).catch((err) =>
-            console.error("[AUTH] Error sending OTP email:", err.message)
-          );
-        }
-
-        return res.redirect(
-          `${frontendUrl}/login?twoFactor=true&sessionId=${sessionId}`
-        );
-      }
     }
 
     // Successful Google Authentication: Issue JWT
